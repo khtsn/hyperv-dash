@@ -1,0 +1,12 @@
+{
+  "label": "Docker host",
+  "description": "Base tools plus Docker and Compose from the Debian repositories; login user joins the docker group",
+  "cloudConfig": {
+    "timezone": "Asia/Ho_Chi_Minh",
+    "packages": ["curl", "git", "htop", "vim", "tmux", "ca-certificates", "docker.io", "docker-compose"],
+    "runcmd": [
+      "usermod -aG docker {{user}}",
+      "systemctl enable --now docker"
+    ]
+  }
+}

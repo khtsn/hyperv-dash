@@ -1,0 +1,360 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hyper-V Dash</title>
+<style>
+  :root { --bg:#f4f5f7; --card:#fff; --ink:#1c2128; --mute:#667085; --line:#e3e6ea; --accent:#2f6fed; --ok:#1a9c5b; --warn:#d98a00; --bad:#d6453d; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#14171c; --card:#1d2128; --ink:#e6e9ee; --mute:#98a2b3; --line:#2c323b; --accent:#6b9bff; --ok:#3fcf8e; --warn:#f0b040; --bad:#f0655d; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:20px 16px 60px; background:var(--bg); color:var(--ink); font:14px/1.45 system-ui, "Segoe UI", sans-serif; }
+  h1 { font-size:20px; margin:0 0 16px; }
+  h2 { font-size:16px; margin:0; }
+  .grid { display:grid; gap:16px; align-items:start; grid-template-columns:repeat(auto-fit, minmax(340px, 1fr)); max-width:1500px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:16px; min-width:0; }
+  .head { display:flex; justify-content:space-between; align-items:baseline; gap:8px; flex-wrap:wrap; }
+  .mute { color:var(--mute); font-size:12px; }
+  .err { color:var(--bad); margin:10px 0; word-break:break-word; }
+  .meter { margin:10px 0 0; }
+  .meter .lbl { display:flex; justify-content:space-between; font-size:12px; color:var(--mute); }
+  .bar { height:8px; border-radius:4px; background:var(--line); overflow:hidden; margin-top:3px; }
+  .bar i { display:block; height:100%; background:var(--accent); }
+  .bar i.hot { background:var(--warn); } .bar i.crit { background:var(--bad); }
+  .scroll { overflow-x:auto; }
+  table { width:100%; border-collapse:collapse; margin-top:14px; font-variant-numeric:tabular-nums; }
+  th, td { text-align:left; padding:6px 8px 6px 0; border-top:1px solid var(--line); white-space:nowrap; }
+  th { font-size:11px; text-transform:uppercase; letter-spacing:.04em; color:var(--mute); border-top:0; }
+  .dot { display:inline-block; width:8px; height:8px; border-radius:50%; background:var(--mute); margin-right:6px; }
+  .dot.Running { background:var(--ok); } .dot.Off { background:var(--bad); }
+  button { font:inherit; font-size:12px; padding:3px 9px; border-radius:6px; border:1px solid var(--line); background:transparent; color:var(--ink); cursor:pointer; }
+  button:hover { border-color:var(--accent); } button:disabled { opacity:.5; cursor:default; }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#fff; padding:6px 14px; }
+  button.danger { color:var(--bad); }
+  details { margin-top:14px; border-top:1px solid var(--line); padding-top:12px; }
+  summary { cursor:pointer; font-weight:600; }
+  form { display:grid; grid-template-columns:1fr 1fr; gap:8px 10px; margin-top:10px; }
+  label { display:flex; flex-direction:column; font-size:12px; color:var(--mute); gap:2px; min-width:0; }
+  label.wide, form .wide { grid-column:1 / -1; }
+  .span { grid-column:1 / -1; }
+  .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  .filebox { border:1px solid var(--line); border-radius:8px; padding:10px; margin-top:8px; display:grid; grid-template-columns:1fr 110px auto; gap:8px; align-items:end; }
+  .filebox textarea { grid-column:1 / -1; }
+  textarea { font:12px/1.4 ui-monospace, Consolas, monospace; padding:6px 7px; border:1px solid var(--line); border-radius:6px; background:var(--bg); color:var(--ink); min-height:96px; resize:vertical; width:100%; }
+  label.check { flex-direction:row; align-items:center; gap:6px; color:var(--ink); font-size:13px; }
+  input, select { font:inherit; padding:5px 7px; border:1px solid var(--line); border-radius:6px; background:var(--bg); color:var(--ink); min-width:0; }
+  pre { background:var(--bg); border:1px solid var(--line); border-radius:6px; padding:8px; margin:10px 0 0; font-size:12px; white-space:pre-wrap; word-break:break-word; max-height:220px; overflow:auto; }
+</style>
+</head>
+<body>
+<h1>Hyper-V Dash</h1>
+<div class="grid" id="grid"></div>
+
+<script>
+const $ = (tag, props = {}, ...kids) => {
+  const e = Object.assign(document.createElement(tag), props);
+  e.append(...kids.filter((k) => k != null));
+  return e;
+};
+const api = async (path, body) => {
+  const r = await fetch(path, body ? { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) } : undefined);
+  const j = await r.json();
+  if (!r.ok) throw new Error(j.error || r.statusText);
+  return j;
+};
+const dur = (s) => s <= 0 ? '-' : s < 3600 ? `${Math.floor(s / 60)}m` : s < 86400 ? `${Math.floor(s / 3600)}h ${Math.floor(s % 3600 / 60)}m` : `${Math.floor(s / 86400)}d ${Math.floor(s % 86400 / 3600)}h`;
+const gb = (mb) => (mb / 1024).toFixed(1);
+
+function meter(label, pct, text) {
+  const fill = $('i', { className: pct >= 90 ? 'crit' : pct >= 75 ? 'hot' : '' });
+  fill.style.width = `${Math.min(100, Math.max(0, pct))}%`;
+  return $('div', { className: 'meter' },
+    $('div', { className: 'lbl' }, $('span', { textContent: label }), $('span', { textContent: text })),
+    $('div', { className: 'bar' }, fill));
+}
+
+class HostCard {
+  constructor(host) {
+    this.host = host;
+    this.busy = false;
+    this.title = $('h2', { textContent: host.name });
+    this.sub = $('span', { className: 'mute', textContent: `${host.address} · connecting…` });
+    this.body = $('div');
+    this.form = this.buildForm();
+    this.log = $('pre', { hidden: true });
+    this.el = $('div', { className: 'card' },
+      $('div', { className: 'head' }, this.title, this.sub),
+      this.body,
+      $('details', {}, $('summary', { textContent: 'New Debian 13 VM' }), this.form, this.log));
+    this.refresh();
+    setInterval(() => this.refresh(), 10000);
+  }
+
+  buildForm() {
+    const field = (label, input, wide) => $('label', { className: wide ? 'wide' : '' }, label, input);
+    const pw = Array.from(crypto.getRandomValues(new Uint8Array(9)), (b) => 'abcdefghjkmnpqrstuvwxyz23456789'[b % 31]).join('');
+    this.f = {
+      name: $('input', { required: true, pattern: '[A-Za-z0-9][A-Za-z0-9-]{0,30}', placeholder: 'deb13-01' }),
+      switch: $('select', { required: true }),
+      cpu: $('input', { type: 'number', value: 2, min: 1, max: 32 }),
+      memMB: $('input', { type: 'number', value: 2048, min: 512, step: 256 }),
+      diskGB: $('input', { type: 'number', value: 20, min: 4 }),
+      user: $('input', { value: 'debian', required: true }),
+      password: $('input', { value: pw }),
+      sshKey: $('input', { placeholder: 'ssh-ed25519 AAAA… (optional)' }),
+      profile: $('select'),
+      ip: $('input', { placeholder: 'blank = DHCP, or 192.168.0.50/24' }),
+      gateway: $('input', { placeholder: '192.168.0.1' }),
+      dns: $('input', { placeholder: '1.1.1.1,8.8.8.8' }),
+    };
+    this.submit = $('button', { className: 'primary wide', textContent: 'Create and install' });
+    const profileNote = this.profileNote = $('div', { className: 'mute wide' });
+    this.f.profile.onchange = () => { this.profileTouched = true; this.showProfileNote(); };
+    this.setProfiles();
+    const pick = $('button', { type: 'button', textContent: 'Pick free IP' });
+    const pickNote = $('span', { className: 'mute' });
+    pick.onclick = async () => {
+      pick.disabled = true;
+      pickNote.textContent = ' checking the switch…';
+      try {
+        const r = await api(`/api/freeip?host=${encodeURIComponent(this.host.name)}&switch=${encodeURIComponent(this.f.switch.value)}`);
+        if (r.ip) { this.f.ip.value = r.ip; this.f.gateway.value = r.gateway; pickNote.textContent = ` ${r.ip} is free`; }
+        else pickNote.textContent = ` ${r.reason}`;
+      } catch (e) { pickNote.textContent = ` ${e.message}`; }
+      pick.disabled = false;
+    };
+    const form = $('form', {},
+      field('VM name', this.f.name), field('Virtual switch', this.f.switch),
+      field('vCPU', this.f.cpu), field('Memory (MB)', this.f.memMB),
+      field('Disk (GB)', this.f.diskGB), field('Login user', this.f.user),
+      field('Password', this.f.password, true), field('SSH public key', this.f.sshKey, true),
+      field('Profile (software and scripts)', this.f.profile, true), profileNote,
+      $('div', { className: 'wide' }, pick, pickNote),
+      field('Static IP (CIDR)', this.f.ip), field('Gateway', this.f.gateway),
+      field('DNS servers', this.f.dns, true),
+      this.submit);
+    form.addEventListener('submit', (e) => { e.preventDefault(); this.create(); });
+    return form;
+  }
+
+  showProfileNote() {
+    const p = PROFILES.find((x) => x.id === this.f.profile.value);
+    this.profileNote.textContent = p ? [p.description, p.packages.length ? `Packages: ${p.packages.join(', ')}` : ''].filter(Boolean).join(' · ') : '';
+  }
+
+  // Called at start and whenever the profile editor saves.
+  setProfiles() {
+    const keep = this.f.profile.value;
+    this.f.profile.replaceChildren(...PROFILES.map((p) => $('option', { value: p.id, textContent: p.isDefault ? `${p.label} (default)` : p.label })));
+    const def = PROFILES.find((p) => p.isDefault)?.id || 'minimal';
+    this.f.profile.value = this.profileTouched && PROFILES.some((p) => p.id === keep) ? keep : def;
+    this.showProfileNote();
+  }
+
+  async refresh() {
+    if (this.busy) return;
+    this.busy = true;
+    try {
+      const s = await api(`/api/host?name=${encodeURIComponent(this.host.name)}`);
+      this.render(s);
+    } catch (e) {
+      this.sub.textContent = `${this.host.address} · unreachable`;
+      this.body.replaceChildren($('div', { className: 'err', textContent: e.message }));
+    } finally { this.busy = false; }
+  }
+
+  render(s) {
+    this.sub.textContent = `${s.computer} · ${s.os} · up ${dur(s.uptimeSec)}`;
+    const used = s.memTotalMB - s.memFreeMB;
+    const rows = s.vms.map((v) => $('tr', {},
+      $('td', {}, $('span', { className: `dot ${v.state}` }), v.name),
+      $('td', { textContent: v.state }),
+      $('td', { textContent: v.state === 'Running' ? `${v.cpuPct}% of ${v.vcpu}` : `${v.vcpu} vCPU` }),
+      $('td', { textContent: v.memMB ? `${gb(v.memMB)} GB` : '-' }),
+      $('td', { textContent: v.ips.join(', ') || '-' }),
+      $('td', { textContent: dur(v.uptimeSec) }),
+      $('td', {}, ...this.actions(v))));
+    this.body.replaceChildren(
+      meter(`CPU (${s.cores} threads)`, s.cpuPct, `${s.cpuPct}%`),
+      meter('Memory', used / s.memTotalMB * 100, `${gb(used)} / ${gb(s.memTotalMB)} GB`),
+      ...s.disks.map((d) => meter(`Disk ${d.name}`, (d.sizeGB - d.freeGB) / d.sizeGB * 100, `${d.freeGB} GB free of ${d.sizeGB} GB`)),
+      $('div', { className: 'scroll' }, $('table', {},
+        $('thead', {}, $('tr', {}, ...['VM', 'State', 'CPU', 'Memory', 'IP', 'Uptime', ''].map((h) => $('th', { textContent: h })))),
+        $('tbody', {}, ...(rows.length ? rows : [$('tr', {}, $('td', { colSpan: 7, className: 'mute', textContent: 'No VMs on this host.' }))])))));
+    const keep = this.f.switch.value;
+    this.f.switch.replaceChildren(...s.switches.map((n) => $('option', { textContent: n, value: n })));
+    if (s.switches.includes(keep)) this.f.switch.value = keep;
+  }
+
+  actions(v) {
+    const btn = (text, action, cls, confirmMsg) => {
+      const b = $('button', { textContent: text, className: cls || '' });
+      b.onclick = async () => {
+        if (confirmMsg && !confirm(confirmMsg)) return;
+        b.disabled = true;
+        try { await api('/api/vm', { host: this.host.name, name: v.name, action }); }
+        catch (e) { alert(e.message); }
+        this.refresh();
+      };
+      return b;
+    };
+    const out = [];
+    if (v.state === 'Off') out.push(btn('Start', 'start'));
+    else out.push(btn('Shut down', 'stop'), ' ', btn('Power off', 'off', '', `Power off ${v.name} without a clean shutdown?`));
+    if (v.managed) out.push(' ', btn('Delete', 'delete', 'danger', `Delete ${v.name} and its disks? This cannot be undone.`));
+    return out;
+  }
+
+  async create() {
+    const body = { host: this.host.name };
+    for (const [k, input] of Object.entries(this.f)) body[k] = input.value;
+    this.submit.disabled = true;
+    this.log.hidden = false;
+    this.log.textContent = 'Starting…';
+    try {
+      const { job } = await api('/api/create', body);
+      for (;;) {
+        await new Promise((r) => setTimeout(r, 1500));
+        const j = await api(`/api/job?id=${job}`);
+        this.log.textContent = j.log.join('\n') || 'Starting…';
+        this.log.scrollTop = this.log.scrollHeight;
+        if (j.status !== 'running') {
+          if (j.status === 'done') this.log.textContent += `\nDone. Log in as ${body.user} once the IP shows in the table.`;
+          break;
+        }
+      }
+    } catch (e) { this.log.textContent = `ERROR: ${e.message}`; }
+    this.submit.disabled = false;
+    this.refresh();
+  }
+}
+
+// Editor for what gets installed on new Debian 13 VMs (profiles/*.json on the server).
+class ProfileEditor {
+  constructor(onChange) {
+    this.onChange = onChange;
+    const area = (placeholder) => $('textarea', { placeholder, spellcheck: false });
+    this.pick = $('select');
+    this.pick.onchange = () => this.load(this.pick.value);
+    const add = $('button', { type: 'button', textContent: 'New profile' });
+    add.onclick = () => this.load(null);
+    this.f = {
+      label: $('input', { placeholder: 'Web server' }),
+      id: $('input', { placeholder: 'web-server', pattern: '[a-z0-9][a-z0-9-]{0,30}' }),
+      description: $('input', { placeholder: 'One line shown under the profile dropdown' }),
+      timezone: $('input', { placeholder: 'Asia/Ho_Chi_Minh (blank = UTC)' }),
+      packages: area('One Debian package per line, e.g.\nnginx\npostgresql'),
+      runcmd: area('One shell command per line; runs once as root on first boot, after the packages.\n{{user}} is replaced by the login user.'),
+      isDefault: $('input', { type: 'checkbox' }),
+    };
+    this.f.label.oninput = () => {
+      if (!this.editing) this.f.id.value = this.f.label.value.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 31);
+    };
+    this.files = $('div', { className: 'wide' });
+    const addFile = $('button', { type: 'button', textContent: 'Add script or file' });
+    addFile.onclick = () => this.addFile({ path: '', permissions: '0755', content: '#!/bin/sh\n' });
+    this.saveBtn = $('button', { className: 'primary', textContent: 'Save profile' });
+    this.delBtn = $('button', { type: 'button', className: 'danger', textContent: 'Delete profile' });
+    this.delBtn.onclick = () => this.remove();
+    this.msg = $('span', { className: 'mute' });
+    const field = (label, input, wide) => $('label', { className: wide ? 'wide' : '' }, label, input);
+    this.form = $('form', {},
+      field('Name', this.f.label), field('File name (id)', this.f.id),
+      field('Description', this.f.description), field('Timezone', this.f.timezone),
+      field('Packages to install', this.f.packages), field('First-boot commands', this.f.runcmd),
+      $('div', { className: 'wide row' }, $('b', { textContent: 'Scripts and files' }), addFile), this.files,
+      $('label', { className: 'wide check' }, this.f.isDefault, 'Use this profile by default for new Debian 13 VMs'),
+      $('div', { className: 'wide row' }, this.saveBtn, this.delBtn, this.msg));
+    this.form.addEventListener('submit', (e) => { e.preventDefault(); this.save(); });
+    this.el = $('div', { className: 'card span' },
+      $('div', { className: 'head' }, $('h2', { textContent: 'Debian 13 software profiles' }),
+        $('span', { className: 'mute', textContent: 'What gets installed on a new VM at first boot. Existing VMs are not changed.' })),
+      $('div', { className: 'row', style: 'margin-top:12px' }, $('span', { className: 'mute', textContent: 'Edit profile' }), this.pick, add),
+      this.form);
+    this.fill();
+  }
+
+  fill(selectId) {
+    this.pick.replaceChildren(...PROFILES.map((p) => $('option', { value: p.id, textContent: p.isDefault ? `${p.label} (default)` : p.label })));
+    this.load(selectId || PROFILES.find((p) => p.isDefault)?.id || 'minimal');
+  }
+
+  load(id) {
+    const p = PROFILES.find((x) => x.id === id) || { id: '', label: '', description: '', timezone: '', packages: [], runcmd: [], files: [], isDefault: false };
+    this.editing = Boolean(p.id);
+    this.builtin = Boolean(p.builtin);
+    this.pick.value = p.id;
+    if (!p.id) this.pick.selectedIndex = -1;
+    this.f.label.value = p.label;
+    this.f.id.value = p.id;
+    this.f.description.value = p.description;
+    this.f.timezone.value = p.timezone;
+    this.f.packages.value = p.packages.join('\n');
+    this.f.runcmd.value = p.runcmd.join('\n');
+    this.f.isDefault.checked = p.isDefault;
+    this.files.replaceChildren();
+    p.files.forEach((f) => this.addFile(f));
+    this.f.id.disabled = this.editing;
+    for (const k of ['label', 'description', 'timezone', 'packages', 'runcmd']) this.f[k].disabled = this.builtin;
+    this.delBtn.hidden = !this.editing || this.builtin;
+    this.msg.textContent = this.builtin ? 'Built-in profile: only the default setting can be changed.' : this.editing ? '' : 'New profile';
+  }
+
+  addFile(f) {
+    const path = $('input', { value: f.path, placeholder: '/usr/local/bin/setup.sh' });
+    const mode = $('input', { value: f.permissions, placeholder: '0755' });
+    const content = $('textarea', { value: f.content, spellcheck: false });
+    const rm = $('button', { type: 'button', className: 'danger', textContent: 'Remove' });
+    const box = $('div', { className: 'filebox' }, $('label', {}, 'Path on the VM', path), $('label', {}, 'Mode', mode), rm, content);
+    box.read = () => ({ path: path.value, permissions: mode.value, content: content.value });
+    rm.onclick = () => box.remove();
+    this.files.append(box);
+  }
+
+  async reload(selectId) {
+    PROFILES = await api('/api/profiles');
+    this.fill(selectId);
+    this.onChange();
+  }
+
+  async save() {
+    const body = {
+      id: this.f.id.value.trim(),
+      label: this.f.label.value,
+      description: this.f.description.value,
+      timezone: this.f.timezone.value,
+      packages: this.f.packages.value.split(/[\s,]+/).filter(Boolean),
+      runcmd: this.f.runcmd.value.split('\n').map((s) => s.trim()).filter(Boolean),
+      files: [...this.files.children].map((b) => b.read()),
+      isDefault: this.f.isDefault.checked,
+    };
+    this.saveBtn.disabled = true;
+    try {
+      await api('/api/profile', body);
+      await this.reload(body.id);
+      this.msg.textContent = 'Saved. New VMs will use it.';
+    } catch (e) { this.msg.textContent = `Not saved: ${e.message}`; }
+    this.saveBtn.disabled = false;
+  }
+
+  async remove() {
+    if (!confirm(`Delete profile "${this.f.label.value}"?`)) return;
+    try {
+      await api('/api/profile/delete', { id: this.f.id.value });
+      await this.reload();
+      this.msg.textContent = 'Deleted.';
+    } catch (e) { this.msg.textContent = e.message; }
+  }
+}
+
+let PROFILES = [];
+api('/api/profiles').then((p) => { PROFILES = p; return api('/api/hosts'); }).then((hosts) => {
+  const cards = hosts.map((h) => new HostCard(h));
+  const editor = new ProfileEditor(() => cards.forEach((c) => c.setProfiles()));
+  document.getElementById('grid').append(...cards.map((c) => c.el), editor.el);
+}).catch((e) => { document.getElementById('grid').textContent = e.message; });
+</script>
+</body>
+</html>

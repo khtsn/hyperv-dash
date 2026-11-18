@@ -1,0 +1,13 @@
+cache/
+state/
+node_modules/
+*.sqlite*
+*.pem
+*.pfx
+/hosts.json
+local-login.xml
+.env
+*.log
+*.vhd
+*.vhdx
+__pycache__/

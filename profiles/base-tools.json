@@ -1,0 +1,15 @@
+{
+  "label": "Base tools",
+  "description": "curl, git, htop, vim, tmux, unattended security updates, Asia/Ho_Chi_Minh timezone",
+  "cloudConfig": {
+    "timezone": "Asia/Ho_Chi_Minh",
+    "packages": ["curl", "git", "htop", "vim", "tmux", "ca-certificates", "unattended-upgrades"],
+    "write_files": [
+      {
+        "path": "/usr/local/bin/vm-info",
+        "permissions": "0755",
+        "content": "#!/bin/sh\n# Example of a script shipped by a profile.\necho \"host: $(hostname)\"\necho \"ip:   $(hostname -I)\"\necho \"os:   Debian $(cat /etc/debian_version)\"\necho \"up:   $(uptime -p)\"\n"
+      }
+    ]
+  }
+}
