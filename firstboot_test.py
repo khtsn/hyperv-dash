@@ -1,5 +1,6 @@
 """Test the guest completion report without booting a VM or touching a KVP device."""
 import os
+import json
 import struct
 import subprocess
 import tempfile
@@ -16,6 +17,19 @@ else:
 
 
 class GuestReport(unittest.TestCase):
+    def test_tailscale_requires_connected_machine_and_address(self):
+        def status(state, online, ips):
+            data = dict(BackendState=state, Self=dict(Online=online), TailscaleIPs=ips)
+            return subprocess.CompletedProcess([], 0, json.dumps(data).encode())
+        for sample in (status("NeedsMachineAuth", True, ["100.64.1.3"]),
+                       status("Running", False, ["100.64.1.3"]), status("Running", True, [])):
+            with patch.object(subprocess, "run", return_value=sample), patch.object(firstboot.time, "sleep"):
+                self.assertEqual(firstboot.enroll_tailscale(), "failed:tailscale not online")
+        with patch.object(subprocess, "run", return_value=status("Running", True, ["100.64.1.3"])):
+            self.assertEqual(firstboot.enroll_tailscale(), "tailscale:100.64.1.3")
+        with patch.object(subprocess, "run", side_effect=subprocess.CalledProcessError(1, "secret", stderr=b"private")):
+            self.assertEqual(firstboot.enroll_tailscale(), "failed:tailscale enrollment failed")
+
     def test_failure_is_sanitized(self):
         run = subprocess.CompletedProcess([], 2, b'{"status":"error","modules-final":{"errors":["secret text"]}}')
         with patch.object(subprocess, "run", return_value=run):

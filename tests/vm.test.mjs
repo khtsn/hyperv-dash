@@ -65,6 +65,40 @@ test('serial session ownership and VM lock',async()=>{
   await req('POST /api/console/close',{id:s.id});await wait({job:s.job});
   assert.doesNotMatch(JSON.stringify(db.prepare('SELECT * FROM jobs WHERE id=?').get(s.job)),/hello|secret/);
 });
+test('graphical sessions bind screen and ordered input to an admin session and a running VM ID',async()=>{
+  const open=()=>req('POST /api/console/screen/open',{host:'lab',name,id});
+  const oldPipe=machine.consolePipe;
+  const oldState=machine.state;
+  machine.consolePipe=null;
+  try {
+    machine.state='Off';
+    await assert.rejects(open(),{status:409});
+    machine.state='Running';
+    for(const role of ['operator','viewer'])
+      await assert.rejects(req('POST /api/console/screen/open',{host:'lab',name,id},{...session,role}),{status:403});
+    await assert.rejects(req('POST /api/console/screen/open',{host:'lab',name,id:randomUUID()}),{status:409});
+    await wait(await act('protect'));await assert.rejects(open(),{status:409});await wait(await act('unprotect'));
+    const screen=await open();
+    try {
+      await assert.rejects(open(),{status:409});
+      const url='GET /api/console/read?id='+screen.id;
+      const stranger={...session,id:'other-session'};
+      await assert.rejects(req(url,{},stranger),{status:404});
+      const image=Buffer.from((await req(url)).image,'base64');
+      assert.equal(image.toString('ascii',1,4),'PNG');
+      const write=events=>req('POST /api/console/write',{id:screen.id,events});
+      await assert.rejects(req('POST /api/console/write',{id:screen.id,events:[{type:'cad'}]},stranger),{status:404});
+      for(const events of [[],Array(65).fill({type:'cad'}),[{type:'move',x:65536,y:0}],
+        [{type:'key',key:65,down:'yes'}],[{type:'button',button:0,down:true}],[{type:'unknown'}]])
+        await assert.rejects(write(events),{status:400});
+      await write([{type:'move',x:2048,y:65535},{type:'button',button:1,down:true},{type:'release'},
+        {type:'key',key:65,down:true},{type:'key',key:65,down:false},{type:'wheel',delta:120},{type:'cad'}]);
+      await assert.rejects(act('off'),{status:409});
+    } finally {await req('POST /api/console/close',{id:screen.id});await wait(screen);}
+    await assert.rejects(req('GET /api/console/read?id='+screen.id),{status:404});
+    assert.doesNotMatch(db.prepare('SELECT log FROM jobs WHERE id=?').get(screen.job).log,/65535|base64|button|keydown/);
+  } finally {machine.consolePipe=oldPipe;machine.state=oldState;}
+});
 test('Windows serial bridge transfers bytes through a real local named pipe', {skip:process.platform!=='win32',timeout:18000},async t=>{
   const id=randomUUID(), pipe='\\\\.\\pipe\\hvdash-'+id;
   let received='',socket;

@@ -1,5 +1,4 @@
-# stdin/stdout newline JSON protocol. Only encoded keystrokes and serial bytes
-# cross this pipe. WinRM runs the named-pipe client on the Hyper-V host itself.
+# Persistent stdin/stdout console protocol. Device operations run on the VM's host.
 $ErrorActionPreference='Stop'
 $ProgressPreference='SilentlyContinue'
 [Console]::OutputEncoding=New-Object Text.UTF8Encoding($false)
@@ -42,6 +41,11 @@ $serialOp = {
 function Send([bool]$Ok,[string]$Value){ [Console]::Out.WriteLine((ConvertTo-Json -InputObject @{ok=$Ok;value=$Value} -Compress)); [Console]::Out.Flush() }
 try {
     $cfg=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String([Console]::ReadLine())) | ConvertFrom-Json
+    $deviceOp=$serialOp
+    if($cfg.mode -eq 'screen'){
+        . (Join-Path $PSScriptRoot 'screen-bridge.ps1')
+        $deviceOp=$screenOp
+    }
     if ($cfg.transport -in @('winrm','winrm-https')) {
         $opts=@{ComputerName=[string]$cfg.address; SessionOption=(New-PSSessionOption -OpenTimeout 8000 -OperationTimeout 15000)}
         if ($cfg.transport -eq 'winrm-https') {$opts.UseSSL=$true}
@@ -66,7 +70,7 @@ try {
     } elseif ($cfg.transport -ne 'local'){throw 'Unsupported console transport.'}
     $op=@{command='open';id=$cfg.id}
     while ($op) {
-        $reply=if($session){Invoke-Command -Session $session -ScriptBlock $serialOp -ArgumentList $op}else{& $serialOp $op}
+        $reply=if($session){Invoke-Command -Session $session -ScriptBlock $deviceOp -ArgumentList $op}else{& $deviceOp $op}
         Send $true ([string]$reply)
         if ($op.command -eq 'close') { break }
         $line=[Console]::ReadLine()
@@ -74,7 +78,13 @@ try {
         $op=$line | ConvertFrom-Json
     }
 } catch {
-    Send $false 'Console connection failed. Verify COM1, guest power, WinRM and that no other client has the serial pipe open.'
+    Send $false 'Console connection failed.'
 } finally {
+    if($cfg.mode -eq 'screen' -and $deviceOp){
+        try {
+            if($session){$null=Invoke-Command -Session $session -ScriptBlock $deviceOp -ArgumentList @{command='close'}}
+            else {$null=& $deviceOp @{command='close'}}
+        } catch {}
+    }
     if ($session){ Remove-PSSession $session -ErrorAction SilentlyContinue } elseif($global:hvSerialPipe){$global:hvSerialPipe.Dispose()}
 }

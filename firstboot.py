@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Publish the cloud-init outcome to the host using the Linux Hyper-V guest KVP pool."""
 import fcntl
+import ipaddress
 import json
 import os
 import re
@@ -43,6 +44,23 @@ def publish(key, message, directory=Path("/var/lib/hyperv")):
         stream.flush()
         os.fsync(stream.fileno())
 
+def enroll_tailscale():
+    try:
+        subprocess.run(["timeout", "--kill-after=5s", "240s", "/bin/sh", "/run/hvdash-tailscale.sh"],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True, timeout=250)
+        for attempt in range(6):
+            run = subprocess.run(["tailscale", "status", "--json"], capture_output=True, timeout=4)
+            if run.returncode == 0:
+                status = json.loads(run.stdout)
+                if status.get("BackendState") == "Running" and (status.get("Self") or {}).get("Online"):
+                    for addr in status.get("TailscaleIPs") or []:
+                        return "tailscale:" + str(ipaddress.ip_address(addr))
+            if attempt < 5:
+                time.sleep(2)
+        return "failed:tailscale not online"
+    except (subprocess.SubprocessError, OSError, ValueError, AttributeError, TypeError):
+        return "failed:tailscale enrollment failed"
+
 def publish_serial(nonce, message, port="/dev/ttyS1"):
     # COM2 is a VM-specific host pipe. Its status line contains no guest data.
     fd = os.open(port, os.O_WRONLY | os.O_NONBLOCK | os.O_NOCTTY)
@@ -56,6 +74,8 @@ if __name__ == "__main__":
     if not re.fullmatch(r"[0-9a-f-]{36}", nonce):
         sys.exit(1)
     status = result()
+    if status == "done" and "--tailscale" in sys.argv[2:]:
+        status = enroll_tailscale()
     try:
         publish_serial(nonce, status)
     except OSError:

@@ -1,7 +1,7 @@
 import {db,put,get,list,del,fail as bad} from './store.mjs';
 import {randomUUID} from 'node:crypto';
-import {isIPv4} from 'node:net';
-import {readFileSync} from 'node:fs';
+import {isIP,isIPv4} from 'node:net';
+import {readFileSync,statSync} from 'node:fs';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 const dir=path.dirname(fileURLToPath(import.meta.url));
@@ -145,30 +145,76 @@ function reserve(network,address,host,vm) {
   db.prepare('INSERT INTO ip_ledger VALUES(?,?,?,?,?)').run(network,address,host,vm,'reserved');
 }
 const imageId='debian-13';
+const windowsId='windows-11';
+const windowsCatalog=path.join(dir,'cache','catalog-v1',windowsId);
+function windowsImage() {
+  if(process.env.HVDASH_FAKE==='1')return {id:windowsId,sha256:'1'.repeat(64),version:'11 (simulated)',virtualSizeBytes:64*2**30,sizeBytes:8*2**30};
+  try {
+    const m=JSON.parse(readFileSync(path.join(windowsCatalog,'manifest.json'),'utf8').replace(/^\uFEFF/,''));
+    if(m.id===windowsId && /^[0-9a-f]{64}$/.test(m.sha256) && Number.isSafeInteger(m.virtualSizeBytes) && m.virtualSizeBytes>0 &&
+       statSync(path.join(windowsCatalog,m.sha256+'.vhdx')).size===m.sizeBytes) return m;
+  } catch {}
+}
 const catalogPath=path.join(dir,'cache','catalog-v1','debian-13','manifest.json');
 const reportScript=readFileSync(path.join(dir,'firstboot.py')).toString('base64');
+const tailscaleInstaller=readFileSync(path.join(dir,'tailscale-enroll.sh'),'utf8').replaceAll('\r\n','\n');
 function spec(b) {
   if(typeof b.name!=='string'||!/^[a-zA-Z0-9][a-zA-Z0-9-]{0,30}$/.test(b.name)||/^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i.test(b.name))throw bad('Use a VM name of 1â€“31 letters, digits and hyphens. Device names are reserved.');
-  if(typeof b.user!=='string'||!/^[a-z_][a-z0-9_-]{0,30}$/.test(b.user))throw bad('Supply a valid Linux login user.');
-  const password=String(b.password||''), sshKey=String(b.sshKey||'').trim();
-  if(!password&&!sshKey || /[\r\n\0]/.test(password+sshKey))throw bad('Supply a single-line password or SSH public key.');
-  if(sshKey&&!/^(ssh-(rsa|ed25519)|ecdsa-sha2-nistp(256|384|521)|sk-ssh-ed25519@openssh.com) [A-Za-z0-9+/]+=*( .*)?$/.test(sshKey))throw bad('Supply an OpenSSH public key.');
+  const windows=b.image===windowsId;
+  if(b.image && b.image!==imageId && !windows)throw bad('Select an image in the library.');
+  if (windows) {
+    if(b.name.length>15 || !/[a-z]/i.test(b.name) || b.name.endsWith('-'))throw bad('Use a Windows computer name of up to 15 characters with a letter and no trailing hyphen.');
+    if(typeof b.user!=='string' || !/^[A-Za-z][A-Za-z0-9_-]{0,19}$/.test(b.user) ||
+       /^(administrator|guest|defaultaccount|wdagutilityaccount|defaultuser0|system)$/i.test(b.user) || b.user.toLowerCase()===b.name.toLowerCase())
+      throw bad('Choose a new local Windows account name of up to 20 characters, distinct from the computer name and built-in accounts.');
+    if(b.profile && b.profile!=='minimal')throw bad('Linux software profiles cannot run on Windows.');
+  } else if(typeof b.user!=='string'||!/^[a-z_][a-z0-9_-]{0,30}$/.test(b.user))throw bad('Supply a valid Linux login user.');
+  const password=String(b.password||'');
+  if (/[\r\n\0]/.test(password)) throw bad('Supply a single-line guest password.');
+  if (b.sshKey != null && typeof b.sshKey !== 'string') throw bad('Supply SSH public keys as text, one per line.');
+  const sshKeys=[];
+  for (const [index,line] of (b.sshKey || '').split(/\r\n|\n|\r/).entries()) {
+    const key=line.trim();
+    if (!key) continue;
+    if (!/^(ssh-(rsa|ed25519)|ecdsa-sha2-nistp(256|384|521)|sk-ssh-ed25519@openssh.com)[ \t]+[A-Za-z0-9+/]+={0,2}([ \t]+[^\x00-\x1f\x7f]*)?$/.test(key))
+      throw bad('Invalid OpenSSH public key on line '+(index+1)+'. Paste one complete key per line.');
+    sshKeys.push(key);
+  }
+  if (!password && !sshKeys.length) throw bad('Supply a guest password or at least one SSH public key.');
   if(typeof b.switch!=='string'||!b.switch||b.switch.length>128||/[\x00-\x1f*?\[\]]/.test(b.switch))throw bad('Select a valid virtual switch.');
   const volume=String(b.volume||'').toUpperCase();
   if(!/^[A-Z]:$/.test(volume))throw bad('Select a local fixed volume from the host.');
-  if(b.image && b.image!==imageId)throw bad('Select an image in the library.');
+  const network=staticNetwork(b), reportId=randomUUID();
+  const tailscaleAuthKey=b.tailscaleAuthKey ?? '';
+  if (typeof tailscaleAuthKey !== 'string' || tailscaleAuthKey.length > 4096 ||
+      (tailscaleAuthKey && !/^tskey-auth-[!-~]+$/.test(tailscaleAuthKey)))
+    throw bad('Enter a single-line Tailscale auth key beginning with tskey-auth-.');
+  const joinTailscale=Boolean(tailscaleAuthKey);
+  if(windows){
+    const media=windowsImage();
+    if(!media)throw bad('Import a Windows 11 x64 installation ISO or generalized VHDX on the management workstation first.',409);
+    if(password && (password.length<12 || password.length>127))throw bad('Supply a Windows password of 12 to 127 characters.');
+    return {name:b.name,image:windowsId,imageHash:media.sha256,volume,switch:b.switch,
+      cpu:number(b.cpu,2,32,'vCPU'),memMB:number(b.memMB,4096,262144,'Memory'),
+      diskGB:number(b.diskGB,Math.max(64,Math.ceil(media.virtualSizeBytes/2**30)),2000,'Disk size'),
+      ip:network.ip||'',gateway:network.gateway||'',prefix:network.prefix??null,
+      windowsGuest:{user:b.user,password,sshKeys,dns:network.dns||[]},joinTailscale,...(joinTailscale && {tailscaleAuthKey})};
+  }
   const p=loadProfiles().find(x=>x.id===(b.profile||defaultProfileId()));
   if(!p)throw bad('Unknown software profile.');
-  const network=staticNetwork(b), reportId=randomUUID();
   const user={name:b.user,sudo:'ALL=(ALL) NOPASSWD:ALL',shell:'/bin/bash',lock_passwd:!password};
   if(password)user.plain_text_passwd=password;
-  if(sshKey)user.ssh_authorized_keys=[sshKey];
+  if(sshKeys.length)user.ssh_authorized_keys=sshKeys;
   const extra=JSON.parse(JSON.stringify(p.cloudConfig||{}).replaceAll('{{user}}',b.user));
+  const reportUnit='hvdash-firstboot-'+reportId;
+  const reportCommand=(joinTailscale ? 'cloud-init-per instance '+reportUnit+' ' : '')+
+    'systemd-run --no-block --unit='+reportUnit+' /usr/bin/python3 /run/hvdash-firstboot.py '+reportId+(joinTailscale ? ' --tailscale' : '');
   const cloud={...extra,hostname:b.name,users:[user],ssh_pwauth:Boolean(password),package_update:true,
-    packages:[...new Set(['hyperv-daemons',...arr(extra.packages)])],
-    bootcmd:[['sh','-c','umask 077; echo '+reportScript+' | base64 -d >/run/hvdash-firstboot.py && systemd-run --no-block --unit=hvdash-firstboot-'+reportId+' /usr/bin/python3 /run/hvdash-firstboot.py '+reportId],...arr(extra.bootcmd)],
+    packages:[...new Set(['hyperv-daemons',...(joinTailscale ? ['ca-certificates','curl'] : []),...arr(extra.packages)])],
+    bootcmd:[['sh','-c','umask 077; echo '+reportScript+' | base64 -d >/run/hvdash-firstboot.py && '+reportCommand],...arr(extra.bootcmd)],
     runcmd:['set -e','udevadm control --reload','udevadm trigger --action=add --subsystem-match=misc','systemctl --no-block start hv-kvp-daemon.service','systemctl enable --no-block --now serial-getty@ttyS0.service',...arr(extra.runcmd)]};
-  return {name:b.name,image:imageId,reportId,volume,switch:b.switch,cpu:number(b.cpu,1,32,'vCPU'),memMB:number(b.memMB,512,262144,'Memory'),diskGB:number(b.diskGB,4,2000,'Disk size'),
+  if (joinTailscale) cloud.write_files=[...arr(extra.write_files),{path:'/run/hvdash-tailscale.sh',permissions:'0700',content:tailscaleInstaller}];
+  return {name:b.name,image:imageId,reportId,joinTailscale,...(joinTailscale && {tailscaleAuthKey}),volume,switch:b.switch,cpu:number(b.cpu,1,32,'vCPU'),memMB:number(b.memMB,512,262144,'Memory'),diskGB:number(b.diskGB,4,2000,'Disk size'),
     ip:network.ip||'',gateway:network.gateway||'',prefix:network.prefix??null,userData:'#cloud-config\n'+JSON.stringify(cloud)+'\n',
     networkConfig:network.ip?JSON.stringify({network:{version:2,ethernets:{eth0:{dhcp4:false,addresses:[network.ip+'/'+network.prefix],routes:[{to:'0.0.0.0/0',via:network.gateway}],nameservers:{addresses:network.dns}}}}}):'',
     metaData:'instance-id: hvdash-'+reportId+'\nlocal-hostname: '+b.name+'\n'};
@@ -201,16 +247,21 @@ async function imageLibrary(ctx) {
   try{meta=JSON.parse(readFileSync(catalogPath,'utf8').replace(/^\uFEFF/,''));}catch{}
   const hosts=list('hosts');
   const probes=[refreshUpstream()];
+  const win=windowsImage();
   for(const host of hosts) {
     if((activeImages.get(host.name)||0)>Date.now())continue;
     activeImages.set(host.name,Date.now()+60000);
     probes.push(ctx.runPs(host,'images',{}, {timeoutMs:30000}).then(info=>put('imageCopies',host.name,info)).catch(()=>{}));
+    if(win && host.transport!=='local')probes.push(ctx.runPs(host,'images',{image:windowsId},{timeoutMs:30000}).then(info=>put('windowsImageCopies',host.name,info)).catch(()=>{}));
   }
   await Promise.race([Promise.all(probes),new Promise(resolve=>setTimeout(resolve,150))]);
   const known=get('catalog','debian-13')||{};
   const copy=hosts.map(h=>get('imageCopies',h.name)).find(i=>i?.present)||{};
-  return [{id:imageId,os:'Debian GNU/Linux',version:meta.version||copy.version||known.version||'13 (trixie)',sizeBytes:meta.sizeBytes||copy.sizeBytes||null,sha256:meta.sha256||copy.sha256||null,archiveSha512:meta.archiveSha512||known.archiveSha512||null,archiveBytes:known.archiveBytes||null,sourceURL:upstream,
-    hosts:hosts.filter(h=>{const info=get('imageCopies',h.name);return info?.present && (meta.sha256?info.sha256===meta.sha256:true);}).map(h=>h.name)}];
+  return [{id:imageId,supportsTailscale:true,os:'Debian GNU/Linux',version:meta.version||copy.version||known.version||'13 (trixie)',sizeBytes:meta.sizeBytes||copy.sizeBytes||null,sha256:meta.sha256||copy.sha256||null,archiveSha512:meta.archiveSha512||known.archiveSha512||null,archiveBytes:known.archiveBytes||null,sourceURL:upstream,
+    hosts:hosts.filter(h=>{const info=get('imageCopies',h.name);return info?.present && (meta.sha256?info.sha256===meta.sha256:true);}).map(h=>h.name)},
+    {id:windowsId,os:'Microsoft Windows',version:win?.version||'11',available:Boolean(win),supportsTailscale:true,
+      minDiskGB:Math.max(64,Math.ceil((win?.virtualSizeBytes||0)/2**30)),sizeBytes:win?.sizeBytes,sha256:win?.sha256,
+      hosts:hosts.filter(h=>{const info=get('windowsImageCopies',h.name);return win && (h.transport==='local' || (info?.present && info.sha256===win.sha256));}).map(h=>h.name)}];
 }
 export async function provisionRoute(ctx){
   const {key,b,url,user,runPs,startJob}=ctx;
@@ -245,15 +296,17 @@ export async function provisionRoute(ctx){
     const job=startJob(user.name,host.name,b.name,'create',async step=>{
       const release=()=>db.prepare("DELETE FROM ip_ledger WHERE network=? AND address=? AND host=? AND vm=? AND source='reserved'").run(networkId,params.ip,host.name,b.name);
       step('Checking live name, switch, address, RAM and free disk');
-      const {userData,metaData,networkConfig,...resources}=params;
+      const {userData,metaData,networkConfig,tailscaleAuthKey,windowsGuest,...resources}=params;
       try{await runPs(host,'preflight',resources,{timeoutMs:30000});}catch(e){release();throw e;}
       try{
-        const made=await runPs(host,'create',params,{timeoutMs:50*60000,onLine:step});
+        const made=await runPs(host,'create',params,{timeoutMs:120*60000,onLine:step});
         if(!made?.id || made.firstBoot!=='done')throw bad('First-boot result unavailable. Reconcile the VM and its reserved address on the host.',502);
+        if(params.joinTailscale && !isIP(made.tailscaleIP || ''))throw bad('Guest Tailscale enrollment was not confirmed. Check the VM on the host.',502);
         put('vmOwnership',(host.name+'/'+b.name).toLowerCase(),{id:made.id,directory:made.directory,files:made.files,creator:user.name,created:new Date().toISOString()});
         if(params.ip)db.prepare("UPDATE ip_ledger SET source='static' WHERE network=? AND address=? AND host=? AND vm=?").run(networkId,params.ip,host.name,b.name);
         activeImages.delete(host.name);
-        step('Debian cloud-init confirmed successful');
+        step(params.image===windowsId?'Windows 11 setup confirmed through PowerShell Direct':'Debian cloud-init confirmed successful');
+        if(params.joinTailscale)step('Tailscale connected at '+made.tailscaleIP);
       }catch(e){
         // A disconnected remote call can leave a VM alive. Never make its IP available speculatively.
         if(e.message.includes('[rolled back]')||e.message.includes('[not created]'))release();

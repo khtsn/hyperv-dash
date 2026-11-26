@@ -109,7 +109,7 @@ const desc = {
   monitoring: ['Monitoring', 'Metric history and alerts across your fleet.'],
   machines: ['Virtual machines', 'Find a VM to inspect its hardware, open the console, or change its state.'],
   networks: ['Networks & IPs', 'Virtual switches, address assignments, and inbound port mappings.'],
-  provision: ['Provision a VM', 'Create a Linux guest and follow its first boot.'],
+  provision: ['Provision a VM', 'Create a guest and follow its first boot.'],
   library: ['Images & profiles', 'Base images and software applied during first boot.'],
   jobs: ['Jobs', 'Operation status and execution logs.'],
   audit: ['Audit log', 'Administrator and operator activity.'],
@@ -953,7 +953,7 @@ async function provision(area, token) {
       placeholder: 'debian-app-01',
       pattern: '[A-Za-z0-9][A-Za-z0-9\\-]{0,30}',
     }),
-    image = select(images.map((i) => [i.id, i.os + ' ' + (i.version || '')])),
+    image = select(images.filter(i => i.available !== false).map((i) => [i.id, i.os + ' ' + (i.version || '')])),
     profile = select(profiles.map((p) => [p.id, p.label + (p.isDefault ? ' (default)' : '')])),
     cpu = input({ required: true, type: 'number', min: 1, max: 32, value: 2 }),
     memMB = input({ required: true, type: 'number', min: 512, max: 262144, value: 2048 }),
@@ -962,6 +962,7 @@ async function provision(area, token) {
     sw = select(),
     userInput = input({ required: true, value: 'debian', pattern: '[a-z_][a-z0-9_\\-]{0,30}' }),
     password = input({ type: 'password', autocomplete: 'new-password' }),
+    tailscaleKey = input({ type: 'password', autocomplete: 'off', spellcheck: false, maxLength: 4096 }),
     sshKey = el('textarea', { placeholder: 'ssh-ed25519 …' }),
     mode = select([
       ['dhcp', 'DHCP'],
@@ -1046,6 +1047,26 @@ async function provision(area, token) {
   };
   mode.onchange = showIP;
   showIP();
+  const profileField=field('Software profile', profile);
+  const userField=field('Linux username', userInput);
+  const loginHint=small('Provide a password or paste SSH public keys, one per line. You can use both.');
+  image.onchange=()=>{
+    const windows=image.value==='windows-11';
+    profileField.hidden=windows;
+    userField.firstChild.textContent=windows?'Windows local administrator':'Linux username';
+    if(userInput.value==='debian' || userInput.value==='vmadmin') userInput.value=windows?'vmadmin':'debian';
+    userInput.pattern=windows?'[A-Za-z][A-Za-z0-9_\\-]{0,19}':'[a-z_][a-z0-9_\\-]{0,30}';
+    name.maxLength=windows?15:31;
+    name.placeholder=windows?'win11-app-01':'debian-app-01';
+    cpu.min=windows?2:1;
+    memMB.min=windows?4096:512;
+    diskGB.min=windows?images.find(i=>i.id===image.value).minDiskGB:4;
+    for(const control of [cpu,memMB,diskGB]){
+      if(Number(control.value)<Number(control.min))control.value=control.min;
+    }
+    password.minLength=windows?12:0;
+    loginHint.textContent=windows?'Use a password of at least 12 characters or supply SSH public keys. Keys enable Windows OpenSSH for administrator accounts.':'Provide a password or paste SSH public keys, one per line. You can use both.';
+  };
   f.append(
     el('h2', {}, 'Guest configuration'),
     el(
@@ -1054,7 +1075,7 @@ async function provision(area, token) {
       field('Host', host),
       field('VM name', name),
       field('Base image', image),
-      field('Software profile', profile),
+      profileField,
       field('vCPU', cpu),
       field('Memory (MiB)', memMB),
       field('Storage volume', volume),
@@ -1064,14 +1085,17 @@ async function provision(area, token) {
     ),
     networkFields,
     capacity,
+    el('h3', {}, 'Tailscale'),
+    field('Tailscale auth key (optional)', tailscaleKey),
+    small('Enter a one-off auth key to join this VM to your tailnet. The completed job shows its Tailscale IP.'),
     el('h3', {}, 'Guest login'),
-    small('Provide an SSH public key, a password, or both.'),
+    loginHint,
     el(
       'div',
       { className: 'fields' },
-      field('Linux username', userInput),
+      userField,
       field('Password', password),
-      field('SSH public key', sshKey, true),
+      field('SSH public keys', sshKey, true),
     ),
     el('div', { className: 'form-actions' }, submit),
     msg,
@@ -1082,13 +1106,20 @@ async function provision(area, token) {
       msg.replaceChildren(alertBox('Enter an SSH public key or a password.'));
       return;
     }
+    if (tailscaleKey.value && !images.find(i => i.id === image.value)?.supportsTailscale) {
+      msg.replaceChildren(alertBox('The running dashboard cannot enroll this image in Tailscale. Restart the updated dashboard and reload this page.'));
+      return;
+    }
     submit.disabled = true;
     msg.textContent = 'Submitting…';
     try {
       const b = Object.fromEntries(Object.entries(inputs).map(([k, v]) => [k, v.value]));
+      if(b.image==='windows-11') delete b.profile;
+      if (tailscaleKey.value) b.tailscaleAuthKey = tailscaleKey.value;
       b.host = host.value;
       if (mode.value === 'static') Object.assign(b, { ip: ip.value, gateway: gateway.value, dns: dns.value });
       const r = await api('/api/create', b);
+      tailscaleKey.value = '';
       password.value = '';
       msg.replaceChildren(
         row(
@@ -1112,7 +1143,7 @@ async function library(area, token) {
   const imageRows = images.map((i) => [
     i.os,
     i.version || '—',
-    i.sizeBytes ? measure(i.sizeBytes, 'GiB', 2 ** 30) : 'Pending download',
+    i.available===false ? 'Import a Windows 11 ISO or VHDX with ops/import-windows-image.ps1' : i.sizeBytes ? measure(i.sizeBytes, 'GiB', 2 ** 30) : 'Pending download',
     i.sha256 ? el('code', { className: 'mono' }, i.sha256) : 'Pending verification',
     (i.hosts || []).join(', ') || 'No verified copies',
   ]);

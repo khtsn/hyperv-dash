@@ -226,7 +226,7 @@ try {
         'stats' { $result = Invoke-OnHost $sbStats $null }
         'freeip' { $result = Invoke-OnHost $sbFreeIp $p }
         'preflight' { $result = Invoke-OnHost $sbProvisionInspect $p }
-        'images' { $result = Invoke-OnHost $sbProvisionImageInfo $null }
+        'images' { $result = Invoke-OnHost $sbProvisionImageInfo $p }
         'create' { $result = Start-Provision $p }
         default { throw "Unknown op '$Op'." }
     }

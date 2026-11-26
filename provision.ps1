@@ -8,7 +8,8 @@ $sbProvisionInspect = {
     $vol = Get-CimInstance Win32_LogicalDisk | Where-Object { $_.DeviceID -eq $p.volume -and $_.DriveType -eq 3 }
     if (!$vol) { throw 'The selected local volume is unavailable.' }
     $margin = [math]::Max(10GB, [double]$vol.Size * 0.1)
-    $needed = [int64]$p.diskGB * 1GB + 64MB
+    $needed = [int64]$p.diskGB * 1GB
+    if ($p.image -ne 'windows-11') { $needed += 64MB; if ($p.joinTailscale) { $needed += 64MB } }
     if ($vol.FreeSpace - $needed -lt $margin) { throw 'Insufficient safe disk capacity. Select a larger volume or reduce the virtual disk size; reserve 10 GiB or 10 percent, whichever is larger.' }
     $os = Get-CimInstance Win32_OperatingSystem
     if (($os.FreePhysicalMemory * 1KB) -lt ([int64]$p.memMB * 1MB + 512MB)) { throw 'Insufficient available host memory. Reduce the VM memory or choose another host.' }
@@ -59,9 +60,12 @@ $sbProvisionImageInfo = {
     $ErrorActionPreference = 'Stop'
     $root = [IO.Path]::GetFullPath((Get-VMHost).VirtualHardDiskPath)
     $dir = Join-Path $root 'hvdash-image-library-v1'
-    $base = Join-Path $dir 'debian-13-base.vhdx'
+    $windows=$p.image -eq 'windows-11'
+    if ($windows) { $dir=Join-Path $dir 'windows-11'; $base=Join-Path $dir 'windows-11-base.vhdx' }
+    else { $base=Join-Path $dir 'debian-13-base.vhdx' }
     $manifest = "$base.json"
     $info = [ordered]@{base=$base;dir=$dir;present=$false;sha256=$null;sizeBytes=0;version='13'}
+    if ($p -eq 'paths' -or $p.paths) { return [pscustomobject]$info }
     if ((Test-Path -LiteralPath $base) -and (Test-Path -LiteralPath $manifest)) {
         $m = Get-Content -Raw -LiteralPath $manifest | ConvertFrom-Json
         $item = Get-Item -LiteralPath $base

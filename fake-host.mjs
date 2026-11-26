@@ -26,12 +26,16 @@ function newVM(name, p={}) {
   const directory = path.win32.join(root+'\\', 'hvdash', name);
   const ips = p.ip ? [p.ip.split('/')[0]] : [];
   const startupMB = p.memMB ?? 2048;
+  const windows=p.image==='windows-11';
+  const managed=windows||Boolean(p.userData);
+  const disks=[disk(path.win32.join(directory,'os.vhdx'),p.diskGB??16)];
+  if(!windows)disks.push(disk(path.win32.join(directory,'seed.vhdx'),0.0625));
   return {
     id, name, state:'Running', vcpu:p.cpu ?? 2, memMB:startupMB, startupMB, dynamic:false,
-    minMB:512, maxMB:8192, notes:p.userData?'hvdash debian-13':'Existing guest', autoStart:'StartIfRunning',
+    minMB:512, maxMB:8192, notes:managed?'hvdash '+(p.image||'debian-13'):'Existing guest', autoStart:'StartIfRunning',
     autoStop:'Save', created:stamp(), adapters:[{name:'Network Adapter', switch:p.switch || sw, mac:'020000000001', ips}],
-    disks:[disk(path.win32.join(directory, 'os.vhdx'), p.diskGB ?? 16),disk(path.win32.join(directory,'seed.vhdx'),0.0625)],
-    checkpoints:[], consolePipe:p.userData?'\\\\.\\pipe\\hvdash-'+id:null, uptimeSec:60, cpuPct:4, directory, ips, tags:[], managed:Boolean(p.userData),
+    disks,
+    checkpoints:[], consolePipe:p.userData?'\\\\.\\pipe\\hvdash-'+id:null, uptimeSec:60, cpuPct:4, directory, ips, tags:[], managed,
   };
 }
 function readHost(host) {
@@ -71,7 +75,8 @@ function preflight(host,p,state) {
   must(!addr||!state.vms.some(v=>v.ips.includes(addr)),'Static IP is already in use.');
   must(s.memFreeMB>=p.memMB+512,'Insufficient host memory.');
   const d=s.disks.find(d=>d.name===(p.volume||'C:').slice(0,2));
-  must(d && d.freeGB-p.diskGB-0.0625>=Math.max(10,d.sizeGB*0.1),'Insufficient storage safety margin.');
+  const mediaGB=p.image==='windows-11'?0:(p.joinTailscale?0.125:0.0625);
+  must(d && d.freeGB-p.diskGB-mediaGB>=Math.max(10,d.sizeGB*0.1),'Insufficient storage safety margin.');
   return {ok:true};
 }
 export async function runFake(host,op,p={},options={}) {
@@ -90,7 +95,7 @@ export async function runFake(host,op,p={},options={}) {
       const index=state.mappings.findIndex(m=>String(m.id)===String(p.id)&&m.nat===p.nat);
       must(index>=0,'NAT mapping not found.');state.mappings.splice(index,1);break;
     }
-    case 'images': return {version:'13',sizeBytes:1610612736,sha256:imageHash,present:true};
+    case 'images': return p.image==='windows-11' ? {version:'11 (simulated)',sizeBytes:8*2**30,sha256:'1'.repeat(64),present:true} : {version:'13',sizeBytes:1610612736,sha256:imageHash,present:true};
     case 'preflight':return preflight(host,p,state);
     case 'freeip': {
       if(p.switch!==sw)return {ip:null,reason:'Select Lab NAT.'};
@@ -103,12 +108,12 @@ export async function runFake(host,op,p={},options={}) {
       options.onLine?.('Copying verified synthetic base');
       const vm=newVM(p.name,p);state.vms.push(vm);writeHost(host,state);
       await delay(250);
-      options.onLine?.('Checking simulated cloud-init result');
+      options.onLine?.(p.image==='windows-11'?'Checking simulated Windows Setup':'Checking simulated cloud-init result');
       if(vm.name===process.env.HVDASH_FAKE_FAIL_VM){
         const latest=readHost(host);latest.vms=latest.vms.filter(v=>v.id!==vm.id);writeHost(host,latest);
         throw Error('cloud-init failed: simulated failure; partial VM and its disks removed. [rolled back]');
       }
-      return {id:vm.id,directory:vm.directory,files:vm.disks.map(d=>d.path),firstBoot:'done'};
+      return {id:vm.id,directory:vm.directory,files:vm.disks.map(d=>d.path),firstBoot:'done',...(p.joinTailscale && {tailscaleIP:'100.64.0.10'})};
     }
     case 'vmDetail':return must(vmByName(state,p.name),'Virtual machine not found.');
     case 'vmApply': {

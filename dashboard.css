@@ -554,6 +554,13 @@ dialog {
 dialog::backdrop {
   background: #08182199;
 }
+.graphical-console { margin-block: 12px; }
+.graphical-console > small { margin-inline-start: 8px; }
+.screen-viewer { display: grid; gap: 8px; }
+.screen-viewer canvas { display: block; width: 100%; height: auto; background: #101318; touch-action: none; }
+.screen-viewer canvas:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+.screen-viewer:fullscreen { box-sizing: border-box; padding: 12px; background: var(--paper); grid-template-rows: auto minmax(0,1fr) auto; }
+.screen-viewer:fullscreen canvas { width: auto; height: auto; max-width: 100%; max-height: 100%; align-self: center; justify-self: center; }
 .dialog-head {
   padding-bottom: 12px;
   border-bottom: 1px solid var(--edge);

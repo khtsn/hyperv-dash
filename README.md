@@ -1,6 +1,6 @@
 # Hyper-V Dash
 
-Hyper-V Dash is an authenticated HTTPS dashboard for monitoring Windows Hyper-V hosts, managing virtual machines and provisioning Debian guests from a cloud image.
+Hyper-V Dash is an authenticated HTTPS dashboard for monitoring Hyper-V hosts, managing virtual machines and provisioning Debian 13 or Windows 11 guests.
 
 **Run:** On Windows, use Node.js 24 or later with `node:sqlite` (tested on Node 26), Windows PowerShell 5.1 and the Hyper-V management tools. OpenSSL is needed for the development certificate unless you supply your own PEM pair. No npm packages are required.
 
@@ -24,8 +24,8 @@ Use the same secret-prompt pattern with `node admin.mjs user NAME viewer|operato
 
 - **Fleet overview** shows issues first, per-host last-seen times, live metrics and capacity. Counts and free capacity use current reporting hosts. Offline inventory is marked stale.
 - **Monitoring** charts host and VM history over 1 hour, 24 hours, 7 days or 30 days. Select a network adapter or disk to inspect throughput and disk latency. Active alerts also appear on Fleet overview. Administrators can change disk and memory thresholds. Slack delivery is optional. [Monitoring and delivery setup](OPERATIONS.md#monitoring-and-alert-delivery)
-- **Virtual machines** supports search, sort, filter, hardware details, edits, power actions, checkpoints, protection and a serial console. Serial requires a configured COM1 pipe and a guest serial terminal. Protection and deletion are checked on the server. Deletion requires confirmed ownership, the current VM ID, the exact name and recorded disk paths. VMs that predate the ownership ledger are treated as unmanaged.
-- **Provisioning** validates the target, takes an IP reservation, verifies Debian's image and the host copy, provisions on the selected volume and waits for the actual guest first-boot outcome. Choose DHCP where a host cannot check static conflicts on that network. See [image, address, cleanup and seed details](PROVISIONING.md).
+- **Virtual machines** supports search, hardware details, power actions and checkpoints. Administrators can select a running VM and choose **Open graphical console** to see its Hyper-V display and use the keyboard and mouse inside the browser, including during Windows Setup. The toolbar offers **Send Ctrl+Alt+Delete**, full screen and disconnect. **Ctrl+Alt+Left** returns keyboard focus to the toolbar. The separate serial console requires COM1 and a guest serial terminal. Interactive consoles respect VM protection and exclusive job locks. Deletion requires confirmed ownership, the current VM ID, the exact name and recorded disk paths.
+- **Provisioning** verifies the base image, reserves the selected resources and waits for the guest to finish setup. The Windows 11 catalog accepts an official installation ISO or a generalized VHDX. Debian 13 uses the official cloud image. See [image import, guest login and networking](PROVISIONING.md).
 - **Networks & IPs** shows switches, retained addresses and host NAT mappings. **Jobs** and **Audit** show running, completed and interrupted work. Audit entries can be searched and exported as CSV. After an interrupted job, reconcile the host before retrying.
 - Install an auto-starting Windows service and back up or restore the application state using the [operations guide](OPERATIONS.md). The application backup includes configuration and history; VM disk backup is a separate operation.
 

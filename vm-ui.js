@@ -1,3 +1,5 @@
+import {graphicalConsole} from './console-ui.js';
+
 function el(tag,text,attrs={}) {
   const e=document.createElement(tag);
   if(text!==null&&text!==undefined)e.textContent=text;
@@ -24,7 +26,7 @@ export async function mountVMPanel(container,{host,name,user,api,refresh}) {
   const pane=el('article',null,{className:'hv-vm-panel'});
   const title=el('h2',name),subtitle=el('p',host),notice=el('p','Loading VM…',{role:'status'}),body=el('div');
   pane.append(title,subtitle,notice,body);container.replaceChildren(pane);
-  let disposed=false,busy=false,consoleSession=null,serialTimer=null,version=0;
+  let disposed=false,busy=false,consoleSession=null,serialTimer=null,version=0,screenConsole=null;
   async function disconnect(){
     const id=consoleSession;consoleSession=null;clearTimeout(serialTimer);
     if(id)await api('/api/console/close',{id}).catch(()=>{});
@@ -35,6 +37,7 @@ export async function mountVMPanel(container,{host,name,user,api,refresh}) {
     try{vm=await api('/api/vm?'+new URLSearchParams({host,name}));}catch(e){if(!disposed&&version===seq)notice.textContent=e.message;return;}
     if(disposed||seq!==version)return;
     const admin=user.role==='admin',ops=admin||user.role==='operator';
+    screenConsole?.dispose();
     body.replaceChildren();notice.textContent='';
     subtitle.textContent=[host,vm.state,vm.protected?'Protected':'',vm.managed?'Dashboard managed':'Externally managed'].filter(Boolean).join(' · ');
     const makeButton=(label,fn,disabled=false)=>{const b=el('button',label,{type:'button',disabled});b.onclick=async()=>{
@@ -92,7 +95,9 @@ export async function mountVMPanel(container,{host,name,user,api,refresh}) {
       power.append(makeButton(vm.protected?'Lift protection':'Protect VM',()=>act(vm.protected?'unprotect':'protect',{},vm.protected?'Allow disruptive actions on this VM.':null)));
       if(vm.managed)power.append(makeButton('Delete VM and disks',()=>act('delete',{confirmFiles:vm.ownedFiles},'Permanently delete VM '+vm.name+' and these disk files:\n'+vm.ownedFiles.join('\n')),vm.protected||vm.state!=='Off'||vm.checkpoints.length>0));
     }
-    body.append(power,section('Hardware and ownership',facts));
+    body.append(power);
+    if(admin){screenConsole=graphicalConsole(vm,host,api);body.append(screenConsole.element);}
+    body.append(section('Hardware and ownership',facts));
     body.append(section('Storage ('+vm.disks.length+')',table(['Disk path','Type','Provisioned','On disk'],vm.disks.map(d=>[d.path,d.type,binaryGB(d.sizeGB),binaryGB(d.fileGB)]))));
     body.append(section('Network adapters ('+vm.adapters.length+')',table(['Adapter','Switch','MAC','IP addresses'],vm.adapters.map(a=>[a.name,a.switch,a.mac,(a.ips||[]).join(', ')]))));
     const cps=vm.checkpoints.map(c=>{
@@ -168,5 +173,5 @@ export async function mountVMPanel(container,{host,name,user,api,refresh}) {
     }
   }
   await load();
-  return ()=>{disposed=true;version++;void disconnect();};
+  return ()=>{disposed=true;version++;screenConsole?.dispose();void disconnect();};
 }

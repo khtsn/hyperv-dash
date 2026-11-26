@@ -68,3 +68,57 @@ test('capacity refusal fails before any create invocation; chosen volume validat
  assert.equal(db.prepare('SELECT 1 FROM ip_ledger WHERE address=?').get('192.0.2.63'),undefined);
  await assert.rejects(provisionRoute(ctx({...body,volume:'Z:'})),/listed by this host/);
 });
+
+test('provision with one SSH key per line, including Windows line endings',async()=>{
+ const keys=['ssh-rsa YWJj first workstation','ssh-ed25519 ZGVm mobile','ssh-rsa Z2hp third workstation'];
+ const body={...b,name:'keys',ip:'',password:'',sshKey:'\r\n'+keys.join('\r\n\r\n')+'\r\n'};
+ const {job}=await provisionRoute(ctx(body));
+ assert.equal((await result(job)).status,'done');
+ const cloud=JSON.parse(created.at(-1).userData.slice('#cloud-config\n'.length));
+ assert.deepEqual(cloud.users[0].ssh_authorized_keys,keys);
+ assert.equal(cloud.ssh_pwauth,false);
+ assert.equal(cloud.users[0].lock_passwd,true);
+ assert.equal(created.at(-1).joinTailscale,false);
+ assert.ok(!cloud.write_files?.some(file=>file.path==='/run/hvdash-tailscale.sh'));
+ await assert.rejects(provisionRoute(ctx({...body,sshKey:keys[0]+'\ninvalid-key'})),/line 2/);
+ await assert.rejects(provisionRoute(ctx({...body,sshKey:'\n  '})),/at least one SSH public key/);
+});
+
+test('Tailscale key is limited to create and success requires a guest address',async()=>{
+ const key='tskey-auth-synthetic-test-only';
+ const body={...b,name:'tailnet',ip:'',tailscaleAuthKey:key};
+ for(const address of ['', '100.64.0.42']) {
+  const {job}=await provisionRoute(ctx(body,async(h,op,p)=>{
+   if(op==='preflight'){assert.ok(p.joinTailscale);assert.ok(!Object.hasOwn(p,'tailscaleAuthKey'));return;}
+   assert.equal(p.tailscaleAuthKey,key);
+   assert.ok(!p.userData.includes(key));
+   const cloud=JSON.parse(p.userData.slice('#cloud-config\n'.length));
+   assert.ok(cloud.bootcmd[0].at(-1).endsWith(' --tailscale'));
+   assert.ok(cloud.write_files.some(f=>f.path==='/run/hvdash-tailscale.sh' && f.content.includes('--auth-key="file:')));
+   return {id:'fixture',firstBoot:'done',files:[],directory:'fixture',tailscaleIP:address};
+  }));
+  const ended=await result(job);
+  assert.equal(ended.status,address?'done':'failed');
+  assert.ok(!ended.log.includes(key));
+  if(address)assert.ok(ended.log.includes(address));
+ }
+ await assert.rejects(provisionRoute(ctx({...body,tailscaleAuthKey:key+'\ninjected'})),/single-line Tailscale auth key/);
+ assert.ok(!JSON.stringify(db.prepare('SELECT * FROM audit').all()).includes(key));
+ assert.ok(!JSON.stringify(db.prepare('SELECT * FROM kv').all()).includes(key));
+});
+
+test('Windows validates hardware and isolates setup credentials from preflight and job records',async()=>{
+ const body={...b,image:'windows-11',user:'vmadmin',name:'win11-qa',ip:'',cpu:2,memMB:4096,diskGB:64,tailscaleAuthKey:'tskey-auth-windows-fixture'};
+ for (const overrides of [{name:'12345'},{user:'Administrator'},{profile:'docker'},{cpu:1},{memMB:4095},{diskGB:63},{password:'short'}]){
+   await assert.rejects(provisionRoute(ctx({...body,...overrides})));
+ }
+ const {job}=await provisionRoute(ctx(body,async(h,op,p)=>{
+   assert.equal(p.image,'windows-11');
+   if(op==='preflight'){assert.ok(!('windowsGuest' in p));assert.ok(!('tailscaleAuthKey' in p));return;}
+   assert.equal(p.windowsGuest.password,b.password);assert.equal(p.windowsGuest.user,'vmadmin');
+   assert.equal(p.userData,undefined);assert.equal(p.imageHash,'1'.repeat(64));
+   return {id:'fixture-win',firstBoot:'done',files:['os.vhdx'],directory:'fixture',tailscaleIP:'100.64.1.4'};
+ }));
+ const ended=await result(job);
+ assert.equal(ended.status,'done');assert.match(ended.log,/Windows 11 setup/);assert.doesNotMatch(ended.log,/cloud-init|synthetic-password|tskey-auth/);
+});

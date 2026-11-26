@@ -1,6 +1,6 @@
 import {randomUUID} from 'node:crypto';
 import {db,get,put,del,fail} from './store.mjs';
-import {openSerial} from './serial.mjs';
+import {openSerial,openScreen} from './serial.mjs';
 
 const actions=new Set(['start','stop','off','restart','pause','resume','save','edit','delete','protect','unprotect',
   'checkpoint-create','checkpoint-restore','checkpoint-delete','console-configure']);
@@ -8,6 +8,7 @@ const confirmations=new Set(['stop','off','restart','pause','save','delete','unp
 const adminActions=new Set(['delete','protect','unprotect','edit','checkpoint-create','checkpoint-restore','checkpoint-delete','console-configure']);
 const protectedActions=new Set(['stop','off','restart','pause','save','delete','edit','checkpoint-restore','checkpoint-delete','console-configure']);
 const consoleSessions=new Map();
+let openingConsoles=0;
 const str=(v,max)=>typeof v==='string'&&v.length>0&&v.length<=max&&!/[\x00-\x1f]/.test(v);
 const uuid=v=>typeof v==='string'&&/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(v);
 const fold=x=>x.toLowerCase();
@@ -107,41 +108,68 @@ async function vmAction(ctx){
 async function consoleRoute(ctx){
   const {b,user,key,url}=ctx;
   requireRole(user,true);
-  if(key==='POST /api/console/open'){
+  const screen=key==='POST /api/console/screen/open';
+  if(screen || key==='POST /api/console/open'){
     ids(b);const h=ctx.host(b.host),d=await ctx.runPs(h,'vmDetail',{name:b.name});checkedDetails(d,b);
     if(get('vmMeta',vmKey(h.name,d.id))?.protected)throw fail('Lift VM protection before opening an interactive console.',409);
-    if(!d.consolePipe||d.state!=='Running')throw fail('Configure COM1 while the VM is off, then start it to use serial.',409);
-    if(consoleSessions.size>=8)throw fail('Console session limit reached.',429);
+    if(screen && d.state!=='Running')throw fail('Start the VM to open its screen.',409);
+    if(!screen && (!d.consolePipe||d.state!=='Running'))throw fail('Configure COM1 while the VM is off, then start it to use serial.',409);
+    if(consoleSessions.size+openingConsoles>=8)throw fail('Console session limit reached.',429);
     const id=randomUUID();
     let connected,failed,finish;
     const ready=new Promise((resolve,reject)=>{connected=resolve;failed=reject;});
     const lifetime=new Promise(resolve=>{finish=resolve;});
-    const {job}=ctx.startJob(user.name,h.name,d.name,'console',async step=>{
-      let serial,timer;
-      try{
-        if(get('vmMeta',vmKey(h.name,d.id))?.protected)throw fail('VM is protected.',409);
-        serial=openSerial(h,d.id);await serial.ready;
-        const session={owner:user.id,id,serial,finish,last:Date.now()};
-        consoleSessions.set(id,session);
-        timer=setInterval(()=>{if(Date.now()-session.last>45000)finish();},5000);timer.unref();
-        step('Serial console connected');connected();await lifetime;
-      } catch(e){failed(e);throw e;}
-      finally{clearInterval(timer);consoleSessions.delete(id);serial?.close();}
-    });
-    await ready;return {id,job};
+    openingConsoles++;
+    try {
+      const {job}=ctx.startJob(user.name,h.name,d.name,'console',async step=>{
+        let bridge,timer;
+        try{
+          if(get('vmMeta',vmKey(h.name,d.id))?.protected)throw fail('VM is protected.',409);
+          bridge=screen?openScreen(h,d.id):openSerial(h,d.id);
+          await bridge.ready;
+          const session={owner:user.id,id,screen,bridge,finish,last:Date.now()};
+          consoleSessions.set(id,session);
+          timer=setInterval(()=>{if(Date.now()-session.last>45000)finish();},5000);
+          timer.unref();
+          step(screen?'Graphical console connected':'Serial console connected');
+          connected();
+          await lifetime;
+        } catch(e){failed(e);throw e;}
+        finally{clearInterval(timer);consoleSessions.delete(id);await bridge?.close();}
+      });
+      await ready;
+      return {id,job};
+    } finally {openingConsoles--;}
   }
   const id=b?.id||url.searchParams.get('id'),s=consoleSessions.get(id);
-  if(!s||s.owner!==user.id)throw fail('Serial session unavailable. Reconnect to the VM.',404);
+  if(!s||s.owner!==user.id)throw fail('Console session unavailable. Reconnect to the VM.',404);
   s.last=Date.now();
   if(key==='POST /api/console/close'){s.finish();return {ok:true};}
   if(key==='POST /api/console/write'){
-    if(typeof b.data!=='string'||!b.data||Buffer.byteLength(b.data)>4096)throw fail('Input must be 1–4096 bytes.');
-    try{await s.serial.write(b.data);}catch(e){s.finish();throw e;}return {ok:true};
+    const input=s.screen?screenInput(b.events):b.data;
+    if(!s.screen && (typeof input!=='string'||!input||Buffer.byteLength(input)>4096))throw fail('Input must be 1–4096 bytes.');
+    try{await s.bridge.write(input);}catch(e){s.finish();throw e;}return {ok:true};
   }
   if(key==='GET /api/console/read'){
-    try{return {text:await s.serial.read(),closed:false};}catch(e){s.finish();throw e;}
+    try{return {[s.screen?'image':'text']:await s.bridge.read(),closed:false};}catch(e){s.finish();throw e;}
   }
-  throw fail('Unknown serial operation.',404);
+  throw fail('Unknown console operation.',404);
+}
+function screenInput(events){
+  if(!Array.isArray(events)||!events.length||events.length>64)throw fail('Supply 1–64 console input events.');
+  return events.map(e=>{
+    if(!e||typeof e!=='object')throw fail('Invalid console input.');
+    switch(e.type){
+      case 'key':case 'button':
+        if(typeof e.down!=='boolean')throw fail('Invalid pressed state.');
+        return e.type==='key'?{type:'key',key:integer(e.key,8,254,'Key'),down:e.down}
+          :{type:'button',button:integer(e.button,1,3,'Mouse button'),down:e.down};
+      case 'move':return {type:'move',x:integer(e.x,0,65535,'X'),y:integer(e.y,0,65535,'Y')};
+      case 'wheel':return {type:'wheel',delta:integer(e.delta,-1200,1200,'Scroll')};
+      case 'release':case 'cad':return {type:e.type};
+      default:throw fail('Unknown console input.');
+    }
+  });
 }
 export async function vmRoute(ctx) {
   if(ctx.key==='GET /api/vms')return listVMs(ctx);

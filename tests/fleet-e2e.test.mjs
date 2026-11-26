@@ -150,7 +150,14 @@ test('HTTPS dashboard manages an isolated fleet through its normal public routes
   assert.equal(vmList.length,1);assert.equal(vmList[0].name,'Legacy VM');
   assert.deepEqual(await ok('/api/vms?tag=none-match',viewer),[]);
   const images=await ok('/api/images',viewer);
-  assert.ok(images.some(i=>i.id==='debian-13'&&i.version));
+  assert.ok(images.some(i=>i.id==='debian-13'&&i.version&&i.supportsTailscale));
+  assert.ok(images.some(i=>i.id==='windows-11' && i.available && i.minDiskGB===64));
+  const winTicket=await ok('/api/create',operator,{host:host.name,name:'windows-test',image:'windows-11',user:'winuser',
+    password:'temporary-fixture-123!',cpu:2,memMB:4096,diskGB:64,switch:'Lab NAT',volume:'D:'});
+  const winJob=await job(winTicket,operator);
+  assert.ok(winJob.log.some(line=>line.includes('Windows 11 setup confirmed')));
+  const winDetail=await ok('/api/vm?'+new URLSearchParams({host:host.name,name:'windows-test'}),viewer);
+  assert.equal(winDetail.disks.length,1);
   const profile='offline-test';
   await ok('/api/profile',admin,{id:profile,label:'Test profile',packages:['curl'],runcmd:[],files:[],isDefault:true});
   assert.ok((await ok('/api/profiles',viewer)).some(p=>p.id===profile&&p.isDefault));
