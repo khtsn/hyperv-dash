@@ -2,7 +2,7 @@
 
 Hyper-V Dash is an authenticated HTTPS dashboard for monitoring Hyper-V hosts, managing virtual machines and provisioning Debian 13 or Windows 11 guests.
 
-**Run:** On Windows, use Node.js 24 or later with `node:sqlite` (tested on Node 26), Windows PowerShell 5.1 and the Hyper-V management tools. OpenSSL is needed for the development certificate unless you supply your own PEM pair. No npm packages are required.
+**Run:** On Windows, use Node.js 24 or later with `node:sqlite` (tested on Node 26), Windows PowerShell 5.1 and the Hyper-V management tools. No npm packages or OpenSSL are required.
 
 On a new PC, clone this repository and run the setup script **as the Windows identity that will run the dashboard**. It checks the prerequisites, asks for the first administrator password (14+ characters) and creates the state in `state\` inside the checkout. You can run it again at any time. It only does what is still missing.
 

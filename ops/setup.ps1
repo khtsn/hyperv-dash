@@ -23,16 +23,6 @@ $app = Split-Path -Parent $PSScriptRoot
 $state = if ($DataDirectory) { [IO.Path]::GetFullPath($DataDirectory) } else { Join-Path $app 'state' }
 $reboot = $false
 
-function Add-OpenSslToPath {
-    if (Get-Command openssl.exe -ErrorAction SilentlyContinue) { return $true }
-    # Git for Windows ships OpenSSL without putting it on PATH.
-    foreach ($dir in @('Git\mingw64\bin', 'Git\usr\bin')) {
-        $dir = Join-Path $env:ProgramFiles $dir
-        if (Test-Path -LiteralPath (Join-Path $dir 'openssl.exe')) { $env:Path = "$env:Path;$dir"; return $true }
-    }
-    return $false
-}
-
 function Install-WingetPackage([string]$Id) {
     if (!(Get-Command winget.exe -ErrorAction SilentlyContinue)) { throw "winget is unavailable. Install $Id manually, then run this script again." }
     & winget.exe install --id $Id --exact --source winget --accept-package-agreements --accept-source-agreements --disable-interactivity
@@ -54,11 +44,6 @@ $prerequisites = @(
             else { Enable-WindowsOptionalFeature -Online -FeatureName Microsoft-Hyper-V-All -All -NoRestart | Out-Null }
             $script:reboot = $true
         }
-    },
-    @{
-        Name    = 'OpenSSL for the localhost certificate (bundled with Git for Windows)'
-        Test    = { (Test-Path -LiteralPath (Join-Path $state 'tls\cert.pem')) -or (Add-OpenSslToPath) }
-        Install = { Install-WingetPackage 'Git.Git' }
     }
 )
 

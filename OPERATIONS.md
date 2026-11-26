@@ -29,7 +29,7 @@ Use a narrowly scoped, dedicated operator for actions that require elevated stor
    $env:HVDASH_DATA = 'C:\ProgramData\HyperVDash\state'
    ```
 
-3. Install a certificate for the management DNS name at `$env:HVDASH_DATA\tls\cert.pem` and its matching unencrypted PEM private key at `tls\key.pem`. Preserve the state directory's protected ACLs. If these files are absent, `admin.mjs init` uses OpenSSL to generate a local-development certificate for `localhost` and `127.0.0.1`. Use a certificate trusted by operator browsers for remote access. Bootstrap the named dashboard administrator from a password prompt.
+3. Install a certificate for the management DNS name at `$env:HVDASH_DATA\tls\cert.pem` and its matching unencrypted PEM private key at `tls\key.pem`. Preserve the state directory's protected ACLs. If both files are absent, `admin.mjs init` generates a self-signed local-development certificate for `localhost` and `127.0.0.1`. Use a certificate trusted by operator browsers for remote access. Bootstrap the named dashboard administrator from a password prompt.
 
    ```powershell
    $initial = Get-Credential -UserName 'fleet-admin' -Message 'Create the first named dashboard account; use at least 14 characters'
